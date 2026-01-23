@@ -679,6 +679,155 @@ impl State {
         }
     }
 
+    /// Determines if the split view should be shown based on terminal width and settings.
+    fn should_show_split_view(settings: &Settings, width: u16, tab_index: usize) -> bool {
+        settings.show_preview
+            && settings.preview.split
+            && width >= settings.preview.split_min_width
+            && tab_index == 0
+    }
+
+    /// Calculates the width for the preview panel in split view mode.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    fn calc_split_preview_width(total_width: u16, ratio: f64) -> u16 {
+        // Clamp ratio to valid range
+        let ratio = ratio.clamp(0.3, 0.9);
+        (f64::from(total_width) * ratio) as u16
+    }
+
+    /// Builds the split view preview content with proper word wrapping.
+    fn build_split_preview<'a>(
+        results: &'a [History],
+        selected: usize,
+        preview_width: u16,
+        theme: &'a Theme,
+    ) -> Paragraph<'a> {
+        if results.is_empty() {
+            return Paragraph::new("No command selected")
+                .style(theme.as_style(Meaning::Annotation))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .title(" Preview "),
+                )
+                .wrap(ratatui::widgets::Wrap { trim: false });
+        }
+
+        let history = &results[selected];
+        let command = &history.command;
+
+        // Calculate inner width (accounting for borders and padding)
+        let inner_width = preview_width.saturating_sub(4) as usize;
+
+        // Build the preview content with metadata header
+        let mut lines: Vec<Line<'a>> = Vec::new();
+
+        // Add command header
+        lines.push(Line::from(vec![
+            Span::styled("Command:", Style::default().add_modifier(Modifier::BOLD)),
+        ]));
+        lines.push(Line::from(""));
+
+        // Word-wrap the command text
+        if inner_width > 0 {
+            for line in command.lines() {
+                let escaped = line.escape_control().to_string();
+                if escaped.is_empty() {
+                    lines.push(Line::from(""));
+                    continue;
+                }
+
+                // Manually wrap long lines
+                let chars: Vec<char> = escaped.chars().collect();
+                let mut start = 0;
+                while start < chars.len() {
+                    let end = (start + inner_width).min(chars.len());
+                    let chunk: String = chars[start..end].iter().collect();
+                    lines.push(Line::from(Span::styled(
+                        chunk,
+                        theme.as_style(Meaning::Base),
+                    )));
+                    start = end;
+                }
+            }
+        }
+
+        // Add metadata section
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("─".repeat(inner_width.min(40)), Style::default()),
+        ]));
+
+        // Exit status
+        let exit_style = if history.success() {
+            theme.as_style(Meaning::AlertInfo)
+        } else {
+            theme.as_style(Meaning::AlertError)
+        };
+        lines.push(Line::from(vec![
+            Span::styled("Exit: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{}", history.exit),
+                exit_style,
+            ),
+        ]));
+
+        // Duration
+        let duration = std::time::Duration::from_nanos(
+            u64::try_from(history.duration).unwrap_or(0),
+        );
+        lines.push(Line::from(vec![
+            Span::styled("Duration: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                super::duration::format_duration(duration),
+                theme.as_style(Meaning::Guidance),
+            ),
+        ]));
+
+        // Working directory
+        lines.push(Line::from(vec![
+            Span::styled("Directory: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                history.cwd.clone(),
+                theme.as_style(Meaning::Annotation),
+            ),
+        ]));
+
+        // Timestamp
+        lines.push(Line::from(vec![
+            Span::styled("Time: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                history
+                    .timestamp
+                    .format(&time::format_description::well_known::Rfc2822)
+                    .unwrap_or_else(|_| "Unknown".to_string()),
+                theme.as_style(Meaning::Annotation),
+            ),
+        ]));
+
+        // Hostname if available
+        if !history.hostname.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("Host: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    history.hostname.clone(),
+                    theme.as_style(Meaning::Annotation),
+                ),
+            ]));
+        }
+
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(" Preview "),
+            )
+            .wrap(ratatui::widgets::Wrap { trim: false })
+    }
+
     #[allow(clippy::bool_to_int_with_if)]
     #[allow(clippy::too_many_lines)]
     fn draw(
@@ -696,16 +845,26 @@ impl State {
             Compactness::Full => 1,
             _ => 0,
         };
+
+        // Check if we should use split view (side-by-side layout)
+        let use_split_view =
+            Self::should_show_split_view(settings, f.area().width, self.tab_index);
+
+        // When using split view, don't show the bottom preview
         let preview_width = f.area().width - 2;
-        let preview_height = Self::calc_preview_height(
-            settings,
-            results,
-            self.results_state.selected(),
-            self.tab_index,
-            compactness,
-            border_size,
-            preview_width,
-        );
+        let preview_height = if use_split_view {
+            0
+        } else {
+            Self::calc_preview_height(
+                settings,
+                results,
+                self.results_state.selected(),
+                self.tab_index,
+                compactness,
+                border_size,
+                preview_width,
+            )
+        };
         let show_help =
             settings.show_help && (matches!(compactness, Compactness::Full) || f.area().height > 1);
         // This is an OR, as it seems more likely for someone to wish to override
@@ -751,6 +910,25 @@ impl State {
         let preview_chunk = if invert { chunks[2] } else { chunks[4] };
         let tabs_chunk = if invert { chunks[3] } else { chunks[1] };
         let header_chunk = if invert { chunks[4] } else { chunks[0] };
+
+        // For split view, divide the results area horizontally
+        let (list_chunk, split_preview_chunk) = if use_split_view {
+            let split_preview_width = Self::calc_split_preview_width(
+                results_list_chunk.width,
+                settings.preview.split_preview_ratio,
+            );
+            let list_width = results_list_chunk.width.saturating_sub(split_preview_width);
+            let horizontal_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Length(list_width),
+                    Constraint::Length(split_preview_width),
+                ])
+                .split(results_list_chunk);
+            (horizontal_chunks[0], Some(horizontal_chunks[1]))
+        } else {
+            (results_list_chunk, None)
+        };
 
         // TODO: this should be split so that we have one interactive search container that is
         // EITHER a search box or an inspector. But I'm not doing that now, way too much atm.
@@ -824,7 +1002,18 @@ impl State {
                     history_highlighter,
                     settings.show_numeric_shortcuts,
                 );
-                f.render_stateful_widget(results_list, results_list_chunk, &mut self.results_state);
+                f.render_stateful_widget(results_list, list_chunk, &mut self.results_state);
+
+                // Render split view preview panel if enabled
+                if let Some(preview_area) = split_preview_chunk {
+                    let split_preview = Self::build_split_preview(
+                        results,
+                        self.results_state.selected(),
+                        preview_area.width,
+                        theme,
+                    );
+                    f.render_widget(split_preview, preview_area);
+                }
             }
 
             1 => {
@@ -1501,6 +1690,7 @@ mod tests {
         let settings_preview_auto = Settings {
             preview: Preview {
                 strategy: PreviewStrategy::Auto,
+                ..Preview::default()
             },
             show_preview: true,
             ..Settings::utc()
@@ -1509,6 +1699,7 @@ mod tests {
         let settings_preview_auto_h2 = Settings {
             preview: Preview {
                 strategy: PreviewStrategy::Auto,
+                ..Preview::default()
             },
             show_preview: true,
             max_preview_height: 2,
@@ -1518,6 +1709,7 @@ mod tests {
         let settings_preview_h4 = Settings {
             preview: Preview {
                 strategy: PreviewStrategy::Static,
+                ..Preview::default()
             },
             show_preview: true,
             max_preview_height: 4,
@@ -1527,6 +1719,7 @@ mod tests {
         let settings_preview_fixed = Settings {
             preview: Preview {
                 strategy: PreviewStrategy::Fixed,
+                ..Preview::default()
             },
             show_preview: true,
             max_preview_height: 15,

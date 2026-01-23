@@ -350,6 +350,34 @@ pub struct Keys {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Preview {
     pub strategy: PreviewStrategy,
+
+    /// Enable split view with command preview on the right side when terminal is wide enough.
+    /// When enabled, the history list appears on the left and a detailed preview panel
+    /// showing the full command and metadata appears on the right.
+    #[serde(default = "default_true")]
+    pub split: bool,
+
+    /// Minimum terminal width (in columns) required to show the split view.
+    /// Below this width, the standard bottom preview is shown instead.
+    #[serde(default = "default_split_min_width")]
+    pub split_min_width: u16,
+
+    /// Width ratio for the preview panel in split view (0.0-1.0).
+    /// Default is 0.65 (65% of width for preview, 35% for list).
+    #[serde(default = "default_split_preview_ratio")]
+    pub split_preview_ratio: f64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_split_min_width() -> u16 {
+    120
+}
+
+fn default_split_preview_ratio() -> f64 {
+    0.65
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -394,6 +422,9 @@ impl Default for Preview {
     fn default() -> Self {
         Self {
             strategy: PreviewStrategy::Auto,
+            split: true,
+            split_min_width: 120,
+            split_preview_ratio: 0.65,
         }
     }
 }
@@ -786,6 +817,9 @@ impl Settings {
             .set_default("inline_height", 40)?
             .set_default("show_preview", true)?
             .set_default("preview.strategy", "auto")?
+            .set_default("preview.split", true)?
+            .set_default("preview.split_min_width", 120)?
+            .set_default("preview.split_preview_ratio", 0.65)?
             .set_default("max_preview_height", 4)?
             .set_default("show_help", true)?
             .set_default("show_tabs", true)?
